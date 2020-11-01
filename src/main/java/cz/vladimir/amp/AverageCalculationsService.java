@@ -10,60 +10,56 @@ import java.util.stream.LongStream;
 import static java.util.stream.Collectors.*;
 
 @Component
-public class DataService {
+public class AverageCalculationsService implements AverageCalculations {
 
     private static final long INTERVAL_IN_MILLIS = java.time.Duration.ofMinutes(15).toMillis();
 
-    private Map<String, Set<Datapoint>> dataByUser = new HashMap<>();
-    private Map<String, Set<Datapoint>> dataByDevice = new HashMap<>();
+    private Map<String, List<Datapoint>> dataByUser = new HashMap<>();
+    private Map<String, List<Datapoint>> dataByDevice = new HashMap<>();
 
-    public void storeDataPoint(Datapoint dataPoint) {
+
+    public synchronized void storeDataPoint(Datapoint dataPoint) {
         storeDatapointByUser(dataPoint);
         storeDatapointByDevice(dataPoint);
     }
 
-    public List<AverageForInterval> getAveragesForDevice(String device) {
-        Set<Datapoint> dataPointsForDevice = dataByDevice.get(device);
+    public synchronized List<AverageForInterval> getAveragesForDevice(String device) {
+        List<Datapoint> dataPointsForDevice = dataByDevice.get(device);
         if (dataPointsForDevice == null) {
             throw new DataNotFoundException();
         }
         return getAverages(dataPointsForDevice);
     }
 
-    //TODO
-    public List<AverageForInterval> getMovingAveragesForDevice(String device, long windowSize) {
-        Set<Datapoint> dataPointsForDevice = dataByDevice.get(device);
-        if (dataPointsForDevice == null) {
-            throw new DataNotFoundException();
-        }
-        return getAverages(dataPointsForDevice);
+    public synchronized List<AverageForInterval> getMovingAveragesForDevice(String device, long windowSize) {
+        List<AverageForInterval> averageForIntervals = getAveragesForDevice(device);
+        addMovingAverage(averageForIntervals, windowSize);
+        return averageForIntervals;
     }
 
-    public List<AverageForInterval> getAveragesForUser(String user) {
-        Set<Datapoint> dataPointsForUser = dataByUser.get(user);
+    public synchronized List<AverageForInterval> getAveragesForUser(String user) {
+        List<Datapoint> dataPointsForUser = dataByUser.get(user);
         if (dataPointsForUser == null) {
             throw new DataNotFoundException();
         }
         return getAverages(dataPointsForUser);
     }
 
-    public List<AverageForInterval> getMovingAveragesForUser(String user, long windowSize) {
-        Set<Datapoint> dataPointsForUser = dataByUser.get(user);
-        if (dataPointsForUser == null) {
-            throw new DataNotFoundException();
-        }
-        return getAverages(dataPointsForUser);
+    public synchronized List<AverageForInterval> getMovingAveragesForUser(String user, long windowSize) {
+        List<AverageForInterval> averageForIntervals = getAveragesForUser(user);
+        addMovingAverage(averageForIntervals, windowSize);
+        return averageForIntervals;
     }
 
-    public void deleteUserDatapoints(String user) {
+    public synchronized void deleteUserDatapoints(String user) {
         dataByUser.remove(user);
     }
 
-    public void deleteDeviceDatapoints(String device) {
+    public synchronized void deleteDeviceDatapoints(String device) {
         dataByDevice.remove(device);
     }
 
-    private List<AverageForInterval> getAverages(Set<Datapoint> datapoints) {
+    private List<AverageForInterval> getAverages(List<Datapoint> datapoints) {
 
         long firstTimestamp = getTimestampOfFirstDataPoint(datapoints);
 
@@ -79,24 +75,41 @@ public class DataService {
                     } else {
                         return new AverageForInterval(intervalStartTime, 0);
                     }
-                }).collect(toList());
+                })
+                .sorted(Comparator.comparingLong(AverageForInterval::getStartTime))
+                .collect(toList());
 
         return averageForIntervals;
+    }
+
+    private void addMovingAverage(List<AverageForInterval> listOfIntervals, long windowSize) {
+        Deque<AverageForInterval> window = new ArrayDeque();
+
+        listOfIntervals.forEach(intervalAverage -> {
+            window.addFirst(intervalAverage);
+            if(window.size() == windowSize){
+                double movingAverage = window.stream()
+                        .mapToDouble(v -> v.getAverage())
+                        .average()
+                        .orElseThrow(DataNotFoundException::new);
+                intervalAverage.setMovingAverage(movingAverage);
+                window.removeLast();
+            }
+        });
     }
 
     private long getHighestIntervalSequenceNumber(Map<Long, Double> averagePerInterval) {
         return averagePerInterval.keySet().stream().mapToLong(v -> v).max().orElseThrow(DataNotFoundException::new);
     }
 
-    private Map<Long, Double> calculateAverageValuesPerInterval(Set<Datapoint> datapoints, long firstTimestamp) {
+    private Map<Long, Double> calculateAverageValuesPerInterval(List<Datapoint> datapoints, long firstTimestamp) {
         Map<Long, Double> averagePerInterval = datapoints.stream()
                 .collect(groupingBy(d -> getIntervalSequenceNumber(firstTimestamp, d.getTimestamp()), averagingLong(Datapoint::getValue)));
-
 
         return averagePerInterval;
     }
 
-    private long getTimestampOfFirstDataPoint(Set<Datapoint> datapoints) {
+    private long getTimestampOfFirstDataPoint(List<Datapoint> datapoints) {
         return datapoints.stream().mapToLong(Datapoint::getTimestamp).min().orElseThrow(DataNotFoundException::new);
     }
 
@@ -116,9 +129,9 @@ public class DataService {
         storeToMultimap(dataByDevice, dataPoint.getDevice(), dataPoint);
     }
 
-    private void storeToMultimap(Map<String, Set<Datapoint>> mapToStore, String key, Datapoint dataPoint) {
+    private void storeToMultimap(Map<String, List<Datapoint>> mapToStore, String key, Datapoint dataPoint) {
         if (mapToStore.containsKey(key)) {
-            Set<Datapoint> existingDatapoints = mapToStore.get(key);
+            List<Datapoint> existingDatapoints = mapToStore.get(key);
 
             boolean isDuplicate = existingDatapoints.stream().anyMatch(existing -> {
                 return existing.isDuplicate(dataPoint);
@@ -130,11 +143,9 @@ public class DataService {
 
             existingDatapoints.add(dataPoint);
         } else {
-            Set<Datapoint> datapoints = new HashSet<>();
+            List<Datapoint> datapoints = new ArrayList<>();
             datapoints.add(dataPoint);
             mapToStore.put(key, datapoints);
         }
     }
-
-
 }
